@@ -7,7 +7,7 @@ Compatible with OpenAI-style API. Also usable with the openai Python library:
 
     import openai
     client = openai.OpenAI(
-        api_key="sk-contool-default-token-change-me",
+        api_key="sk-llmrouter-default-token-change-me",
         base_url="https://RELAY_IP:443/v1",
     )
 """

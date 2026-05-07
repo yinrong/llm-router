@@ -1,0 +1,32 @@
+# llmrouter A installer for Windows — bootstraps WSL Ubuntu and runs install_a.sh inside it.
+# Does not write any llmrouter files outside WSL's ~/.llmrouter/.
+param(
+    [string]$GroupId = "$GROUP_ID_DEFAULT",
+    [string]$XBaseUrl = "$X_BASE_URL_DEFAULT"
+)
+
+if (-not $GroupId) {
+    $GroupId = Read-Host "group_id ({phone}_{suffix})"
+}
+if ($GroupId -notmatch '^[0-9]{11}_[A-Za-z0-9_-]{1,32}$') {
+    Write-Error "invalid group_id: $GroupId"
+    exit 1
+}
+
+# Check WSL
+$wslOk = $false
+try {
+    $null = wsl --status 2>$null
+    if ($LASTEXITCODE -eq 0) { $wslOk = $true }
+} catch {}
+
+if (-not $wslOk) {
+    Write-Host "WSL not detected. Installing Ubuntu via 'wsl --install -d Ubuntu'..."
+    Write-Host "On Windows 10 you may need to reboot before WSL is usable."
+    wsl --install -d Ubuntu
+    Write-Host "If WSL was just installed, please reboot and re-run this script."
+    exit 0
+}
+
+Write-Host "Running install_a.sh inside WSL Ubuntu..."
+wsl -d Ubuntu -- bash -c "curl -fsSL '$XBaseUrl/install/a.sh' | bash -s -- --group-id '$GroupId'"

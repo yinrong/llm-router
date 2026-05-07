@@ -10,6 +10,7 @@ import os
 
 import aiohttp
 import config
+from c_x_client import XClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("app")
@@ -20,10 +21,37 @@ def _random_padding() -> str:
     return "".join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
+def build_x_client_for_c() -> XClient | None:
+    if not config.GROUP_ID:
+        return None
+    config.ROLE = "C"
+    client_id = (
+        os.environ.get("CLIENT_ID_C")
+        or config.CLIENT_ID
+        or config.load_or_create_client_id()
+    )
+    return XClient(
+        x_base_url=config.X_BASE_URL,
+        group_id=config.GROUP_ID,
+        client_id=client_id,
+    )
+
+
 class Worker:
-    def __init__(self):
+    def __init__(self, x_client: XClient | None = None):
         self.session: aiohttp.ClientSession | None = None
         self._running = True
+        self.x_client = x_client if x_client is not None else build_x_client_for_c()
+        # If no X client (no group_id), behave as before — always active.
+        if self.x_client is None:
+            self._always_active_event = asyncio.Event()
+            self._always_active_event.set()
+
+    @property
+    def _active_event(self) -> asyncio.Event:
+        if self.x_client is not None:
+            return self.x_client.should_be_active
+        return self._always_active_event
 
     async def start(self):
         ssl_ctx = ssl.create_default_context()
@@ -33,20 +61,45 @@ class Worker:
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         self.session = aiohttp.ClientSession(connector=connector)
 
-        backoff = config.RECONNECT_BASE
-        while self._running:
+        if self.x_client is not None:
             try:
-                await self._connect()
-                backoff = config.RECONNECT_BASE
+                await self.x_client.start()
             except Exception as e:
-                log.warning("Retrying in %ds (%s)", backoff, type(e).__name__)
+                log.warning("X client start failed: %s", e)
 
-            if not self._running:
-                break
-            await asyncio.sleep(backoff + random.uniform(0, 2))
-            backoff = min(backoff * 2, config.RECONNECT_MAX)
+        backoff = config.RECONNECT_BASE
+        try:
+            while self._running:
+                try:
+                    # Wait until X says we are the active C.
+                    await self._wait_active_or_stop()
+                    if not self._running:
+                        break
+                    await self._connect()
+                    backoff = config.RECONNECT_BASE
+                except Exception as e:
+                    log.warning("Retrying in %ds (%s)", backoff, type(e).__name__)
 
-        await self.session.close()
+                if not self._running:
+                    break
+                await asyncio.sleep(backoff + random.uniform(0, 2))
+                backoff = min(backoff * 2, config.RECONNECT_MAX)
+        finally:
+            if self.x_client is not None:
+                try:
+                    await self.x_client.stop()
+                except Exception:
+                    pass
+            await self.session.close()
+
+    async def _wait_active_or_stop(self):
+        # Cooperative wait: returns when active OR _running flips false.
+        while self._running and not self._active_event.is_set():
+            try:
+                await asyncio.wait_for(self._active_event.wait(), timeout=0.5)
+                return
+            except asyncio.TimeoutError:
+                continue
 
     def _use_tls(self) -> bool:
         if config.RELAY_TLS == "true":
@@ -65,6 +118,7 @@ class Worker:
             log.info("Ready")
 
             heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
+            inactivity_task = asyncio.create_task(self._watch_inactivity(ws))
             try:
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -74,6 +128,19 @@ class Worker:
                         break
             finally:
                 heartbeat_task.cancel()
+                inactivity_task.cancel()
+
+    async def _watch_inactivity(self, ws: aiohttp.ClientWebSocketResponse):
+        """Close the WS as soon as we're told to stand by."""
+        try:
+            while not ws.closed and self._running:
+                if not self._active_event.is_set():
+                    log.info("No longer active; closing tunnel")
+                    await ws.close()
+                    return
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
 
     async def _heartbeat_loop(self, ws: aiohttp.ClientWebSocketResponse):
         try:

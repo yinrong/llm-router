@@ -1,122 +1,126 @@
-# contool - 隐蔽 LLM API 中继（claude-code-proxy）
+# llmrouter
 
-通过中间节点，将 C 网络的大模型 API 安全中继到外部，所有流量伪装为正常 HTTPS 网站访问。
+通过中间节点，将内网的大模型 API 安全中继到外部，所有流量伪装为正常 HTTPS 网站访问；多节点统一由中心协调服务管理。
 
 ## 架构
 
+四方角色：
+
 ```
-A (Claude Code 客户端)      B (claude-code-proxy)           C (C 网络)
+A (Claude Code 客户端)      B (公网 relay)              C (内网隧道)
      │                          │                           │
      │ HTTPS 请求               │     WSS 出站连接          │
      │ /anthropic/v1/messages ► │ ◄── /ws/notifications     │
      │                          │                           │
-     │ ◄── JSON 响应 ────────── │ ──► C 网络 LLM API ─────►  │
+     │ ◄── JSON 响应 ────────── │ ──► 内网 LLM API ─────►   │
+                                │
+                                ▼  控制面（注册/选主/审计/版本）
+                       X (yinaisvr.duckdns.org)
+                       └── sqlite ── group/client/audit
 ```
 
-- **A**：Claude Code 客户端，可以和 B 在同一台机器，也可以在任意网络
-- **B**：claude-code-proxy，需要有公网 IP（如家里的电脑），对外是普通 HTTPS 网站
-- **C**：隧道客户端，在 C 网络内，主动出站连接 B
+- **A**：Claude Code 客户端，任意网络。
+- **B**：每个 group 一个 B（用户自有公网 IP）；对外是普通 HTTPS 网站，内里把请求经 WSS 转发给 C。
+- **C**：内网隧道客户端，主动出站连接 B。同 group 可启动多个 C 待命，X 选主只有一个 active。
+- **X**：中心协调服务（固定域名 `yinaisvr.duckdns.org`），sqlite 持久化所有 group。控制面，**不在数据路径上**。
 
-## 配置步骤
+一个 group 的 `group_id` 格式：`{phone(11位数字)}_{suffix(1-32 [A-Za-z0-9_-])}`。一个手机号可创建多个 group。
 
-### 前提条件
+## 安装（curl 一键）
 
-- **A**：安装 Claude Code（`npm install -g @anthropic-ai/claude-code`），无需 Python
-- **B、C**：Python 3.10+
+A、B、C 三方都通过 `curl ... | bash` 安装；所有文件落地仅在 `~/.llmrouter/` 子树下。
 
-### 准备 B 的网络环境（已完成可跳过）
-
-1. B 需要一个指向其公网 IP 的域名（用于 TLS 证书）
-2. B 在路由器/NAT 后面时，设置端口转发：外部 8443 → B 局域网 IP:8443
-3. 国内运营商封锁 80/443，使用 **8443**
-
-### 第一步：配置 B
+### B 端（公网机器）
 
 ```bash
-git clone git@github.com:yinrong/contool.git
-cd contool
-python -m venv venv
-source venv/bin/activate
-pip install aiohttp cryptography
-python setup.py          # 选择 B，输入域名和端口
-bash setup_tls.sh        # 申请正式 TLS 证书（证书有效期 90 天，续期重新运行）
+curl -fsSL https://yinaisvr.duckdns.org/install/b.sh | GROUP_ID=13800138000_home bash
 ```
 
-完成后会打印两样东西：
-- **C 的邀请码**：发给 C 的运维人员
-- **B 的服务地址**（`ANTHROPIC_BASE_URL`）：发给 A 的用户
+完成后：
+- 装到 `~/.llmrouter/b/`，systemd unit 在 `~/.llmrouter/systemd/llmrouter-b.service`
+- 通过 `systemctl --user enable --now llmrouter-b` 启动；`loginctl enable-linger $USER` 开机自启
+- 默认监听 8443（user-systemd 不能授 `CAP_NET_BIND_SERVICE` 监听 443）
 
-### 第二步：配置 C
+### C 端（内网机器）
 
 ```bash
-git clone git@github.com:yinrong/contool.git
-cd contool
-python -m venv venv
-source venv/bin/activate
-pip install aiohttp cryptography
-python setup.py          # 选择 C，粘贴邀请码，输入 C 网络内的 LLM 地址
+curl -fsSL https://yinaisvr.duckdns.org/install/c.sh | \
+  GROUP_ID=13800138000_home INTERNAL_LLM_BASE=http://10.0.0.5:8000 bash
 ```
 
-### 第三步：配置 A（Claude Code）
+同 group 的多个 C 都装上即可，X 自动选主，仅 1 个 active。
 
-A 不需要安装 contool。需要从 B 的运维人员获取 B 的服务地址，从 LLM 服务提供方获取 API Key 和可用模型名称。
+### A 端（Linux/macOS/WSL）
 
-设置系统环境变量（PowerShell 管理员，永久生效）：
+```bash
+curl -fsSL https://yinaisvr.duckdns.org/install/a.sh | bash -s -- --group-id 13800138000_home
+```
+
+脚本写 `~/.llmrouter/a/env.sh` 与 `claude-settings.snippet.json`，**不主动**改 `~/.bashrc` 或 `~/.claude/settings.json`，会打印合并指令让你手动选择。
+
+### A 端（Windows）
 
 ```powershell
-# 替换 <B的域名:端口> 为 B 运维人员提供的服务地址，替换 <API Key> 和 <模型名> 为 LLM 服务提供方给的值
-[Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "https://<B的域名:端口>/anthropic", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "<API Key>", "User")
-[Environment]::SetEnvironmentVariable("CLAUDE_CODE_MODEL", "<模型名>", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", "<模型名>", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", "<模型名>", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", "<模型名>", "User")
-[Environment]::SetEnvironmentVariable("NODE_TLS_REJECT_UNAUTHORIZED", "0", "User")
+iwr https://yinaisvr.duckdns.org/install/a.ps1 -UseBasicParsing | iex
 ```
 
-设置后重启终端使环境变量生效。
+脚本检测 WSL；未装则 `wsl --install -d Ubuntu`（Win10 需重启），随后在 WSL 内运行 `install/a.sh`。Windows 主机上不落地任何 llmrouter 文件。
 
-将以下内容写入 `~/.claude/settings.json`：
-
-```json
-{
-  "env": {
-    "hasCompletedOnboarding": "true",
-    "ANTHROPIC_BASE_URL": "https://<B的域名:端口>/anthropic",
-    "ANTHROPIC_API_KEY": "<API Key>",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<模型名>",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<模型名>",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<模型名>",
-    "NODE_TLS_REJECT_UNAUTHORIZED": "0"
-  },
-  "skipDangerousModePermissionPrompt": true
-}
-```
-
-运行 `claude` 即可。
-
-## 启动服务
-
-启动顺序：**B → C**，A 直接运行 `claude`。
+## 查询 group 状态
 
 ```bash
-# B：
-cd ~/contool && source venv/bin/activate
-nohup python relay_server.py > relay.log 2>&1 &
-
-# C：
-cd ~/contool && source venv/bin/activate
-nohup python _server.py > server.log 2>&1 &
+curl https://yinaisvr.duckdns.org/api/groups?phone=13800138000
+curl https://yinaisvr.duckdns.org/api/groups/13800138000_home
 ```
+
+## 自更新
+
+B/C 周期性轮询 `GET /api/version/{role}`，发现新版本时下载 tarball（带 sha256 校验）到 `~/.llmrouter/releases/`，由 systemd `Restart=always` 切换。默认 1 小时 + 0–600 秒抖动。
+
+## 开发
+
+```bash
+git clone git@github.com:yinrong/llm-router.git
+cd llm-router
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+pip install pytest pytest-asyncio
+python -m pytest tests/ -v          # 全套 ~6 秒
+```
+
+各组件本地启动：
+- X：`python -m x`
+- B：`python relay_server.py`
+- C：`python _server.py`
 
 ## 文件说明
 
 | 文件 | 用途 |
 |------|------|
-| `setup.py` | B/C 配置向导 |
-| `relay_server.py` | B：claude-code-proxy |
-| `_server.py` | C：隧道服务 |
-| `config.py` | 配置加载 |
-| `setup_tls.sh` | B：DuckDNS + Let's Encrypt 一键配置 |
-| `gen_cert.py` | 自签名证书生成（setup.py 内部调用） |
+| `relay_server.py` | B：公网 relay（aiohttp） |
+| `_server.py` | C：内网隧道客户端 |
+| `b_x_client.py` / `c_x_client.py` | B/C 与 X 控制面通信 |
+| `c_replicate.py` | C 自扩散 stub（未实现） |
+| `x/` | X 中心协调服务包（aiohttp + sqlite） |
+| `x/scripts/*.tmpl` | 安装脚本与 systemd unit 模板 |
 | `static/index.html` | 伪装网站首页 |
+| `gen_cert.py` / `setup_tls.sh` | 自签名 / Let's Encrypt 证书 |
+| `setup.py` | 旧版交互向导（已 deprecated，保留兼容） |
+| `tests/` | 端到端测试（无 mock） |
+| `docs/replication.md` | C 自扩散设计草案 |
+
+## 文件落地约束
+
+llmrouter 在用户机器上**只允许把文件写到 `~/.llmrouter/` 子树**：
+
+```
+~/.llmrouter/
+├── b/、c/、x/、a/          # 各角色部署目录
+├── cache/                  # client_id.json、b/c-tunnel.json
+├── data/x.sqlite           # 仅 X
+├── releases/               # 自更新缓存
+├── logs/
+└── systemd/{llmrouter-b,llmrouter-c}.service
+```
+
+唯一例外：`systemctl --user link` 会在 `~/.config/systemd/user/` 建一个 symlink（systemd 自身行为），unit 内容仍在 `~/.llmrouter/`。

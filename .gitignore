@@ -1,4 +1,34 @@
 __pycache__/
 *.pyc
+*.pyo
+
+# Local-only artifacts
 certs/
 .env
+.env.local
+relay.log
+server.log
+*.log
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Test/build caches
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# llmrouter writes runtime files under ~/.llmrouter/, not the repo.
+# But if a release tarball ever ends up here, ignore it:
+x/release/*.tgz
+x/releases/*.tgz
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

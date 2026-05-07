@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# llmrouter C installer (tunnel client)
+set -euo pipefail
+
+X_BASE_URL="${X_BASE_URL:-$X_BASE_URL_DEFAULT}"
+GROUP_ID="${GROUP_ID:-$GROUP_ID_DEFAULT}"
+INTERNAL_LLM_BASE="${INTERNAL_LLM_BASE:-}"
+
+if [ -z "$GROUP_ID" ]; then
+  read -rp "group_id ({phone}_{suffix}): " GROUP_ID
+fi
+
+if ! [[ "$GROUP_ID" =~ ^[0-9]{11}_[A-Za-z0-9_-]{1,32}$ ]]; then
+  echo "invalid group_id: $GROUP_ID" >&2
+  exit 1
+fi
+
+if [ -z "$INTERNAL_LLM_BASE" ]; then
+  read -rp "internal LLM base URL (e.g. http://10.0.0.5:8000): " INTERNAL_LLM_BASE
+fi
+
+LLMROUTER_HOME="$HOME/.llmrouter"
+mkdir -p "$LLMROUTER_HOME"/{c,cache,releases,logs,systemd}
+
+curl -fsSL "$X_BASE_URL/api/download/c/latest" -o "$LLMROUTER_HOME/releases/c.tgz"
+tar -xzf "$LLMROUTER_HOME/releases/c.tgz" -C "$LLMROUTER_HOME/c"
+
+if [ ! -d "$LLMROUTER_HOME/c/venv" ]; then
+  python3 -m venv "$LLMROUTER_HOME/c/venv"
+fi
+"$LLMROUTER_HOME/c/venv/bin/pip" install --quiet aiohttp cryptography
+
+cat > "$LLMROUTER_HOME/c/.env" <<EOF
+GROUP_ID=$GROUP_ID
+X_BASE_URL=$X_BASE_URL
+INTERNAL_LLM_BASE=$INTERNAL_LLM_BASE
+RELAY_TLS=true
+LLMROUTER_HOME=$LLMROUTER_HOME
+EOF
+
+cat > "$LLMROUTER_HOME/systemd/llmrouter-c.service" <<EOF
+[Unit]
+Description=llmrouter C (tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$LLMROUTER_HOME/c
+ExecStart=$LLMROUTER_HOME/c/venv/bin/python $LLMROUTER_HOME/c/_server.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=LLMROUTER_HOME=$LLMROUTER_HOME
+
+[Install]
+WantedBy=default.target
+EOF
+
+loginctl enable-linger "$USER" || true
+systemctl --user link "$LLMROUTER_HOME/systemd/llmrouter-c.service" || true
+systemctl --user daemon-reload
+systemctl --user enable --now llmrouter-c
+
+echo "llmrouter C installed under $LLMROUTER_HOME"

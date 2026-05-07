@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-echo contool - 用户端 (A)
+echo llmrouter - 用户端 (A)
 echo.
 
 REM 检查 Python

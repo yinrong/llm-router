@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# llmrouter B installer
+# All files land under ~/.llmrouter/. The only filesystem write outside that
+# subtree is a systemd symlink created by `systemctl --user link`.
+set -euo pipefail
+
+X_BASE_URL="${X_BASE_URL:-$X_BASE_URL_DEFAULT}"
+GROUP_ID="${GROUP_ID:-$GROUP_ID_DEFAULT}"
+
+if [ -z "$GROUP_ID" ]; then
+  read -rp "group_id ({phone}_{suffix}): " GROUP_ID
+fi
+
+if ! [[ "$GROUP_ID" =~ ^[0-9]{11}_[A-Za-z0-9_-]{1,32}$ ]]; then
+  echo "invalid group_id: $GROUP_ID" >&2
+  exit 1
+fi
+
+LLMROUTER_HOME="$HOME/.llmrouter"
+mkdir -p "$LLMROUTER_HOME"/{b,cache,releases,logs,systemd,data}
+
+curl -fsSL "$X_BASE_URL/api/download/b/latest" -o "$LLMROUTER_HOME/releases/b.tgz"
+tar -xzf "$LLMROUTER_HOME/releases/b.tgz" -C "$LLMROUTER_HOME/b"
+
+if [ ! -d "$LLMROUTER_HOME/b/venv" ]; then
+  python3 -m venv "$LLMROUTER_HOME/b/venv"
+fi
+"$LLMROUTER_HOME/b/venv/bin/pip" install --quiet aiohttp cryptography
+
+PUBLIC_IP="$(curl -fsS https://ifconfig.me || echo 127.0.0.1)"
+cat > "$LLMROUTER_HOME/b/.env" <<EOF
+GROUP_ID=$GROUP_ID
+X_BASE_URL=$X_BASE_URL
+RELAY_HOST=0.0.0.0
+RELAY_PORT=8443
+RELAY_ADDR=$PUBLIC_IP
+LLMROUTER_HOME=$LLMROUTER_HOME
+EOF
+
+cat > "$LLMROUTER_HOME/systemd/llmrouter-b.service" <<EOF
+[Unit]
+Description=llmrouter B (relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$LLMROUTER_HOME/b
+ExecStart=$LLMROUTER_HOME/b/venv/bin/python $LLMROUTER_HOME/b/relay_server.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=LLMROUTER_HOME=$LLMROUTER_HOME
+
+[Install]
+WantedBy=default.target
+EOF
+
+loginctl enable-linger "$USER" || true
+systemctl --user link "$LLMROUTER_HOME/systemd/llmrouter-b.service" || true
+systemctl --user daemon-reload
+systemctl --user enable --now llmrouter-b
+
+echo "llmrouter B installed under $LLMROUTER_HOME"
+echo "RELAY_PORT=8443  (user-systemd cannot grant CAP_NET_BIND_SERVICE for 443)"

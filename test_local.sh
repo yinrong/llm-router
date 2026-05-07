@@ -6,7 +6,7 @@ set -e
 export RELAY_PORT=8443
 export RELAY_ADDR=127.0.0.1
 export RELAY_TLS=true
-export TUNNEL_SECRET=tun-contool-default-secret-change-me
+export TUNNEL_SECRET=tun-llmrouter-default-secret-change-me
 export INTERNAL_LLM_BASE=http://127.0.0.1:9000
 
 cd "$(dirname "$0")"

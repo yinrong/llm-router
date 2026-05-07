@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# llmrouter A configurator. Writes ~/.llmrouter/a/{env.sh,claude-settings.snippet.json}
+# and PRINTS instructions; never edits ~/.bashrc or ~/.claude/settings.json directly.
+set -euo pipefail
+
+X_BASE_URL="${X_BASE_URL:-$X_BASE_URL_DEFAULT}"
+GROUP_ID="${GROUP_ID:-$GROUP_ID_DEFAULT}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --group-id) GROUP_ID="$2"; shift 2 ;;
+    --group-id=*) GROUP_ID="${1#*=}"; shift ;;
+    *) shift ;;
+  esac
+done
+
+if [ -z "$GROUP_ID" ]; then
+  read -rp "group_id ({phone}_{suffix}): " GROUP_ID
+fi
+
+if ! [[ "$GROUP_ID" =~ ^[0-9]{11}_[A-Za-z0-9_-]{1,32}$ ]]; then
+  echo "invalid group_id: $GROUP_ID" >&2
+  exit 1
+fi
+
+LLMROUTER_HOME="$HOME/.llmrouter"
+mkdir -p "$LLMROUTER_HOME/a"
+
+GROUP_INFO="$(curl -fsS "$X_BASE_URL/api/groups/$GROUP_ID")" || {
+  echo "failed to fetch group info from $X_BASE_URL" >&2
+  exit 1
+}
+
+B_ADDR="$(echo "$GROUP_INFO" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("b_addr") or "")')"
+B_PORT="$(echo "$GROUP_INFO" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("b_port") or 8443)')"
+
+if [ -z "$B_ADDR" ]; then
+  echo "B not yet registered for $GROUP_ID; ask the group admin to install B first." >&2
+  exit 2
+fi
+
+cat > "$LLMROUTER_HOME/a/env.sh" <<EOF
+# llmrouter A — source this from your shell rc to enable Claude Code via group $GROUP_ID
+export ANTHROPIC_BASE_URL="https://$B_ADDR:$B_PORT/anthropic"
+export NODE_TLS_REJECT_UNAUTHORIZED=0
+EOF
+
+cat > "$LLMROUTER_HOME/a/claude-settings.snippet.json" <<EOF
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://$B_ADDR:$B_PORT/anthropic",
+    "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+  }
+}
+EOF
+
+cat <<EOF
+
+llmrouter A configured for group $GROUP_ID
+
+Next steps (run these manually if desired):
+
+  echo 'source $LLMROUTER_HOME/a/env.sh' >> ~/.bashrc
+  # or merge $LLMROUTER_HOME/a/claude-settings.snippet.json into ~/.claude/settings.json
+EOF
