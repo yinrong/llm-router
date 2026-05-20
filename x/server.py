@@ -14,6 +14,7 @@ from aiohttp import web
 from x import VERSION
 from x import db as xdb
 from x import election as xelection
+from x import relay as xrelay
 from x import scripts as xscripts
 from x import version as xver
 
@@ -217,7 +218,9 @@ def _render_install(name: str, request: web.Request) -> str:
 
 
 async def install_b(request: web.Request) -> web.Response:
-    return web.Response(text=_render_install("b.sh.tmpl", request), content_type="text/x-shellscript")
+    # B is now part of X — no separate install needed.
+    msg = "# B is now co-located with X.\n# Users only need to install C.\n# See /install/c.sh\n"
+    return web.Response(text=msg, content_type="text/x-shellscript")
 
 
 async def install_c(request: web.Request) -> web.Response:
@@ -237,8 +240,11 @@ def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yi
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     os.makedirs(releases_dir, exist_ok=True)
     conn = xdb.connect(db_path)
+    relay = xrelay.MultiTenantRelay(db=conn)
+
     app = web.Application()
     app["db"] = conn
+    app["relay"] = relay
     app["config"] = {
         "x_base_url": x_base_url,
         "heartbeat_interval": heartbeat_interval,
@@ -247,6 +253,10 @@ def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yi
         "db_path": db_path,
     }
 
+    # Camouflage home page
+    app.router.add_get("/", relay.handle_index)
+
+    # Control-plane endpoints
     app.router.add_get("/healthz", healthz)
     app.router.add_post("/api/groups", create_group)
     app.router.add_get("/api/groups", list_groups)
@@ -262,6 +272,13 @@ def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yi
     app.router.add_get("/install/c.sh", install_c)
     app.router.add_get("/install/a.sh", install_a)
     app.router.add_get("/install/a.ps1", install_a_ps1)
+
+    # Data-plane endpoints (relay: C tunnel + A API calls)
+    app.router.add_get("/ws/notifications", relay.handle_websocket)
+    app.router.add_route("*", r"/g/{group_id}/{path:.*}", relay.handle_api)
+
+    # Catch-all camouflage (must be last)
+    app.router.add_route("*", r"/{path:.*}", relay.handle_catch_all)
 
     async def _close_db(app):
         try:

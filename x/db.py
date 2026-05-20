@@ -40,6 +40,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
           b_last_seen INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_groups_phone ON groups(phone);
+        CREATE INDEX IF NOT EXISTS idx_groups_secret ON groups(tunnel_secret);
 
         CREATE TABLE IF NOT EXISTS clients (
           client_id TEXT PRIMARY KEY,
@@ -71,6 +72,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_audit_group_ts ON audit_log(group_id, ts);
         """
     )
+
+
+def get_group_by_secret(conn: sqlite3.Connection, tunnel_secret: str) -> dict | None:
+    """Lookup a group by its tunnel_secret (used by the relay WS auth)."""
+    row = conn.execute("SELECT * FROM groups WHERE tunnel_secret=?", (tunnel_secret,)).fetchone()
+    return dict(row) if row else None
 
 
 def validate_group_id(group_id: str) -> tuple[str, str]:

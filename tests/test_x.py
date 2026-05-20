@@ -146,16 +146,11 @@ async def test_version_endpoint_unknown_role(x_server, http_client):
 
 
 async def test_install_script_renders_b(x_server, http_client):
-    group_id = "13900000004_install"
-    async with http_client.get(
-        f"{x_server['url']}/install/b.sh", params={"group_id": group_id}
-    ) as resp:
+    # B is now co-located with X; /install/b.sh returns a deprecation notice.
+    async with http_client.get(f"{x_server['url']}/install/b.sh") as resp:
         assert resp.status == 200
-        assert "text/x-shellscript" in resp.headers.get("Content-Type", "")
         body = await resp.text()
-        assert "set -euo pipefail" in body
-        assert group_id in body
-        assert f"127.0.0.1:{x_server['port']}" in body
+        assert "install/c.sh" in body  # points users to C installer
 
 
 async def test_install_script_renders_c(x_server, http_client):

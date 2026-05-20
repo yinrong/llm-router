@@ -4,8 +4,6 @@ import asyncio
 import sqlite3
 import time
 
-import pytest
-
 TEST_GROUP_ID = "13800138000_test"
 
 
@@ -22,7 +20,7 @@ def _read_audit_rows(db_path, group_id):
         conn.close()
 
 
-async def _wait_for_audit(db_path, group_id, *, predicate, timeout=10.0):
+async def _wait_for_audit(db_path, group_id, *, predicate, timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         rows = _read_audit_rows(db_path, group_id)
@@ -33,11 +31,11 @@ async def _wait_for_audit(db_path, group_id, *, predicate, timeout=10.0):
 
 
 async def test_audit_e2e_normal_request(full_chain, client):
-    relay_port = full_chain["relay_port"]
+    x_port = full_chain["x_port"]
     db_path = full_chain["x_server"]["db_path"]
 
     async with client.post(
-        f"https://127.0.0.1:{relay_port}/v1/chat/completions",
+        f"http://127.0.0.1:{x_port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "audit-test"}]},
         headers={"content-type": "application/json"},
     ) as resp:
@@ -56,22 +54,24 @@ async def test_audit_e2e_normal_request(full_chain, client):
     assert matching[0]["latency_ms"] > 0
 
 
-async def test_audit_e2e_no_tunnel_502(relay, client):
+async def test_audit_e2e_no_tunnel_502(x_server, client):
     """Without a tunnel attached, B should respond 502 and still emit an audit row."""
-    relay_port = relay["port"]
-    db_path = relay["x_server"]["db_path"]
+    x_port = x_server["port"]
+    db_path = x_server["db_path"]
 
-    relay_instance = relay["relay_instance"]
-    if relay_instance.tunnel_ws is not None and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
+    relay = x_server["app"]["relay"]
+    ws = relay.tunnels.get(TEST_GROUP_ID)
+    if ws is not None and not ws.closed:
+        await ws.close()
     # Give the close handler a chance to clear the reference.
     for _ in range(50):
-        if relay_instance.tunnel_ws is None or relay_instance.tunnel_ws.closed:
+        ws = relay.tunnels.get(TEST_GROUP_ID)
+        if ws is None or ws.closed:
             break
         await asyncio.sleep(0.1)
 
     async with client.post(
-        f"https://127.0.0.1:{relay_port}/v1/chat/completions",
+        f"http://127.0.0.1:{x_port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "no-tunnel"}]},
         headers={"content-type": "application/json"},
     ) as resp:

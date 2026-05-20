@@ -101,16 +101,20 @@ class Worker:
             except asyncio.TimeoutError:
                 continue
 
-    def _use_tls(self) -> bool:
-        if config.RELAY_TLS == "true":
-            return True
-        if config.RELAY_TLS == "false":
-            return False
-        return os.path.exists(config.CERT_FILE) and os.path.exists(config.KEY_FILE)
+    @staticmethod
+    def _ws_url() -> str:
+        """Derive the relay WS URL from X_BASE_URL (the canonical X/B address).
+
+        Production:  https://yinaisvr.duckdns.org → wss://yinaisvr.duckdns.org/ws/notifications
+        Tests / dev: http://127.0.0.1:PORT         → ws://127.0.0.1:PORT/ws/notifications
+        """
+        from urllib.parse import urlparse
+        p = urlparse(config.X_BASE_URL)
+        scheme = "wss" if p.scheme == "https" else "ws"
+        return f"{scheme}://{p.netloc}{config.WS_PATH}"
 
     async def _connect(self):
-        scheme = "wss" if self._use_tls() else "ws"
-        url = f"{scheme}://{config.RELAY_ADDR}:{config.RELAY_PORT}{config.WS_PATH}"
+        url = self._ws_url()
         headers = {"Cookie": f"_sid={config.TUNNEL_SECRET}"}
 
         log.info("Starting")

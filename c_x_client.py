@@ -43,8 +43,6 @@ class XClient:
         self.version = version
         self.session: aiohttp.ClientSession | None = None
 
-        self.relay_addr: str | None = None
-        self.relay_port: int | None = None
         self.tunnel_secret: str | None = None
         self.election_poll: int = config.ELECTION_POLL_INTERVAL
 
@@ -102,18 +100,13 @@ class XClient:
             log.warning("X register/c failed: %s", e)
             return False
 
-        self.relay_addr = body.get("relay_addr") or None
-        self.relay_port = int(body.get("relay_port") or 0) or None
         self.tunnel_secret = body.get("tunnel_secret") or None
         self.election_poll = int(body.get("election_poll") or self.election_poll)
-        if self.relay_addr and self.relay_port:
-            # Mirror into config so existing _server code reads correctly.
-            config.RELAY_ADDR = self.relay_addr
-            config.RELAY_PORT = self.relay_port
+        # relay_addr/port no longer needed — C derives the WS URL from X_BASE_URL directly.
         if self.tunnel_secret:
             config.TUNNEL_SECRET = self.tunnel_secret
         self._save_cached()
-        log.info("Registered with X (group=%s, relay=%s:%s)", self.group_id, self.relay_addr, self.relay_port)
+        log.info("Registered with X (group=%s)", self.group_id)
         return True
 
     async def _election_loop(self) -> None:
@@ -205,8 +198,6 @@ class XClient:
                 json.dump({
                     "group_id": self.group_id,
                     "tunnel_secret": self.tunnel_secret,
-                    "relay_addr": self.relay_addr,
-                    "relay_port": self.relay_port,
                 }, f)
         except OSError:
             pass
@@ -218,11 +209,6 @@ class XClient:
             if data.get("group_id") != self.group_id:
                 return
             self.tunnel_secret = data.get("tunnel_secret") or self.tunnel_secret
-            self.relay_addr = data.get("relay_addr") or self.relay_addr
-            self.relay_port = data.get("relay_port") or self.relay_port
-            if self.relay_addr and self.relay_port:
-                config.RELAY_ADDR = self.relay_addr
-                config.RELAY_PORT = self.relay_port
             if self.tunnel_secret:
                 config.TUNNEL_SECRET = self.tunnel_secret
             log.info("Loaded cached X config for %s", self.group_id)

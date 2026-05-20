@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import ssl
 
 import aiohttp
 import pytest
@@ -11,43 +10,35 @@ from aiohttp import web
 
 
 TEST_TUNNEL_SECRET = "tun-test-secret-for-e2e"
+TEST_GROUP_ID = "13800138000_test"
 
 
-
-def _client_ssl_ctx():
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-async def test_camouflage_index(relay, client):
+async def test_camouflage_index(x_server, client):
     """GET / returns the static camouflage page."""
-    port = relay["port"]
-    async with client.get(f"https://127.0.0.1:{port}/") as resp:
+    port = x_server["port"]
+    async with client.get(f"http://127.0.0.1:{port}/") as resp:
         assert resp.status == 200
         text = await resp.text()
         assert "<html" in text.lower() or "welcome" in text.lower()
 
 
-async def test_camouflage_random_path(relay, client):
+async def test_camouflage_random_path(x_server, client):
     """GET /random/path returns camouflage page (catch-all)."""
-    port = relay["port"]
-    async with client.get(f"https://127.0.0.1:{port}/some/random/path") as resp:
+    port = x_server["port"]
+    async with client.get(f"http://127.0.0.1:{port}/some/random/path") as resp:
         assert resp.status == 200
         text = await resp.text()
         assert "<html" in text.lower() or "welcome" in text.lower()
 
 
-async def test_tunnel_auth_reject(relay):
+async def test_tunnel_auth_reject(x_server):
     """WebSocket with wrong cookie gets 404 (camouflage)."""
-    port = relay["port"]
-    connector = aiohttp.TCPConnector(ssl=_client_ssl_ctx())
-    session = aiohttp.ClientSession(connector=connector)
+    port = x_server["port"]
+    session = aiohttp.ClientSession()
     try:
         with pytest.raises(aiohttp.WSServerHandshakeError) as exc_info:
             async with session.ws_connect(
-                f"wss://127.0.0.1:{port}/ws/notifications",
+                f"ws://127.0.0.1:{port}/ws/notifications",
                 headers={"Cookie": "_sid=wrong-secret"},
             ):
                 pass
@@ -56,18 +47,19 @@ async def test_tunnel_auth_reject(relay):
         await session.close()
 
 
-async def test_no_tunnel_502(relay, client):
+async def test_no_tunnel_502(x_server, client):
     """API request without tunnel connected returns 502."""
-    port = relay["port"]
-    relay_instance = relay["relay_instance"]
+    port = x_server["port"]
+    relay = x_server["app"]["relay"]
 
-    # Ensure no tunnel is connected
-    if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
-        relay_instance.tunnel_ws = None
+    # Ensure no tunnel is connected for this group
+    ws = relay.tunnels.get(TEST_GROUP_ID)
+    if ws and not ws.closed:
+        await ws.close()
+        await asyncio.sleep(0.1)
 
     async with client.post(
-        f"https://127.0.0.1:{port}/anthropic/v1/messages",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/anthropic/v1/messages",
         json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
         headers={"content-type": "application/json"},
     ) as resp:
@@ -78,10 +70,10 @@ async def test_no_tunnel_502(relay, client):
 
 async def test_non_stream(full_chain, client):
     """Full chain non-stream request returns correct response."""
-    port = full_chain["relay_port"]
+    port = full_chain["x_port"]
 
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={
             "model": "test-model",
             "messages": [{"role": "user", "content": "hello e2e"}],
@@ -100,10 +92,10 @@ async def test_non_stream(full_chain, client):
 
 async def test_stream(full_chain, client):
     """Full chain stream request returns SSE event stream."""
-    port = full_chain["relay_port"]
+    port = full_chain["x_port"]
 
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={
             "model": "test-model",
             "messages": [{"role": "user", "content": "hello stream"}],
@@ -130,13 +122,13 @@ async def test_stream(full_chain, client):
 
 async def test_header_allowlist(full_chain, client):
     """Custom headers are NOT forwarded to upstream LLM."""
-    port = full_chain["relay_port"]
+    port = full_chain["x_port"]
     mock_llm = full_chain["mock_llm"]
     received = mock_llm["received_headers"]
     received.clear()
 
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={
             "model": "test-model",
             "messages": [{"role": "user", "content": "header test"}],
@@ -163,11 +155,11 @@ async def test_header_allowlist(full_chain, client):
 
 async def test_concurrent_requests(full_chain, client):
     """Multiple concurrent requests each get correct responses."""
-    port = full_chain["relay_port"]
+    port = full_chain["x_port"]
 
     async def make_request(i):
         async with client.post(
-            f"https://127.0.0.1:{port}/v1/chat/completions",
+            f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
             json={
                 "model": "test-model",
                 "messages": [{"role": "user", "content": f"concurrent-{i}"}],
@@ -186,13 +178,13 @@ async def test_concurrent_requests(full_chain, client):
     assert len(set(results)) == 5
 
 
-async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
+async def test_tunnel_disconnect_reconnect(x_server, mock_llm, client):
     """After tunnel disconnects, requests fail; after reconnect, they succeed."""
     import importlib
     import _server
 
-    port = relay["port"]
-    relay_instance = relay["relay_instance"]
+    port = x_server["port"]
+    relay = x_server["app"]["relay"]
 
     # Start tunnel
     importlib.reload(_server)
@@ -200,13 +192,13 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
     task = asyncio.create_task(worker.start())
 
     for _ in range(50):
-        if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
+        if TEST_GROUP_ID in relay.tunnels and not relay.tunnels[TEST_GROUP_ID].closed:
             break
         await asyncio.sleep(0.1)
 
     # Verify working
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "before disconnect"}]},
         headers={"content-type": "application/json"},
     ) as resp:
@@ -214,8 +206,9 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
 
     # Disconnect tunnel
     worker._running = False
-    if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
+    ws = relay.tunnels.get(TEST_GROUP_ID)
+    if ws and not ws.closed:
+        await ws.close()
     task.cancel()
     try:
         await task
@@ -228,7 +221,7 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
 
     # Request should fail
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "during disconnect"}]},
         headers={"content-type": "application/json"},
     ) as resp:
@@ -240,13 +233,13 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
     task2 = asyncio.create_task(worker2.start())
 
     for _ in range(50):
-        if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
+        if TEST_GROUP_ID in relay.tunnels and not relay.tunnels[TEST_GROUP_ID].closed:
             break
         await asyncio.sleep(0.1)
 
     # Request should work again
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "after reconnect"}]},
         headers={"content-type": "application/json"},
     ) as resp:
@@ -254,8 +247,9 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
 
     # Cleanup
     worker2._running = False
-    if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
+    ws2 = relay.tunnels.get(TEST_GROUP_ID)
+    if ws2 and not ws2.closed:
+        await ws2.close()
     task2.cancel()
     try:
         await task2
@@ -265,15 +259,15 @@ async def test_tunnel_disconnect_reconnect(relay, mock_llm, client):
         await worker2.session.close()
 
 
-async def test_upstream_unreachable(relay, client):
+async def test_upstream_unreachable(x_server, client):
     """Request when upstream LLM is unreachable returns 502 proxy_error."""
     import importlib
     import os
     import socket
     import _server
 
-    port = relay["port"]
-    relay_instance = relay["relay_instance"]
+    port = x_server["port"]
+    relay = x_server["app"]["relay"]
 
     # Find a port with nothing listening
     sock = socket.socket()
@@ -292,14 +286,14 @@ async def test_upstream_unreachable(relay, client):
     task = asyncio.create_task(worker.start())
 
     for _ in range(100):
-        if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
+        if TEST_GROUP_ID in relay.tunnels and not relay.tunnels[TEST_GROUP_ID].closed:
             break
         await asyncio.sleep(0.1)
-    assert relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed, "Tunnel failed to connect"
+    assert TEST_GROUP_ID in relay.tunnels and not relay.tunnels[TEST_GROUP_ID].closed, "Tunnel failed to connect"
 
     # C can't connect to upstream → proxy_error 502
     async with client.post(
-        f"https://127.0.0.1:{port}/v1/chat/completions",
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "unreachable test"}]},
         headers={"content-type": "application/json"},
         timeout=aiohttp.ClientTimeout(total=10),
@@ -310,8 +304,9 @@ async def test_upstream_unreachable(relay, client):
 
     # Cleanup
     worker._running = False
-    if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
+    ws = relay.tunnels.get(TEST_GROUP_ID)
+    if ws and not ws.closed:
+        await ws.close()
     task.cancel()
     try:
         await task

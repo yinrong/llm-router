@@ -1,8 +1,16 @@
+"""Test fixtures for llmrouter.
+
+X/B is now a single unified process.  Tests talk to x_server via plain
+HTTP (no TLS needed in tests); C connects via plain WS.
+
+Session-scoped fixtures (x_server, mock_llm) are shared across the full
+test run — roughly the same approach as before but simpler (no relay cert).
+"""
+
 import asyncio
 import importlib
 import os
 import socket
-import ssl
 import sys
 import tempfile
 
@@ -21,41 +29,29 @@ TEST_SUFFIX = "test"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _ensure_certs():
-    cert_path = os.path.join(PROJECT_ROOT, "certs", "server.crt")
-    if not os.path.exists(cert_path):
-        sys.path.insert(0, PROJECT_ROOT)
-        from gen_cert import generate_cert
-        generate_cert(cert_dir=os.path.join(PROJECT_ROOT, "certs"))
-
-
 def _free_port() -> int:
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
     return port
 
 
-def _setup_env(*, mock_llm_port, relay_port, x_port, llmrouter_home, group_id=TEST_GROUP_ID, client_id_b="client-b-test", client_id_c="client-c-test"):
-    os.environ["RELAY_HOST"] = "127.0.0.1"
-    os.environ["RELAY_PORT"] = str(relay_port)
-    os.environ["RELAY_ADDR"] = "127.0.0.1"
-    os.environ["TUNNEL_SECRET"] = TEST_TUNNEL_SECRET
+def _setup_env(*, mock_llm_port: int, x_port: int, llmrouter_home: str,
+               group_id: str = TEST_GROUP_ID):
     os.environ["INTERNAL_LLM_BASE"] = f"http://127.0.0.1:{mock_llm_port}"
-    os.environ["CERT_FILE"] = os.path.join(PROJECT_ROOT, "certs", "server.crt")
-    os.environ["KEY_FILE"] = os.path.join(PROJECT_ROOT, "certs", "server.key")
-    os.environ["RELAY_TLS"] = "true"
-
-    os.environ["LLMROUTER_HOME"] = llmrouter_home
+    # X_BASE_URL tells C where to connect (plain HTTP in tests → ws:// WS)
     os.environ["X_BASE_URL"] = f"http://127.0.0.1:{x_port}"
     os.environ["GROUP_ID"] = group_id
+    os.environ["LLMROUTER_HOME"] = llmrouter_home
     os.environ["X_HEARTBEAT_INTERVAL"] = "30"
     os.environ["X_AUDIT_BATCH_INTERVAL"] = "1"
     os.environ["ELECTION_POLL_INTERVAL"] = "1"
-    # Per-role client ids — set by the consumer fixture before its reload.
-    os.environ.setdefault("CLIENT_ID_B", client_id_b)
-    os.environ.setdefault("CLIENT_ID_C", client_id_c)
+    # Per-role client id for C
+    os.environ.setdefault("CLIENT_ID_C", "client-c-test")
+    # C uses plain WS in tests (X_BASE_URL is http → ws://)
+    os.environ["RELAY_TLS"] = "false"
+    os.environ["TUNNEL_SECRET"] = TEST_TUNNEL_SECRET
 
 
 def _reload_config():
@@ -93,21 +89,35 @@ async def mock_llm():
     await runner.cleanup()
 
 
-@pytest_asyncio.fixture(scope="session")
-async def x_server():
-    """Real X coordinator running over plain HTTP on 127.0.0.1:<random>.
+def _seed_test_group(app, group_id=TEST_GROUP_ID, tunnel_secret=TEST_TUNNEL_SECRET):
+    from x import db as xdb
+    conn = app["db"]
+    if xdb.get_group(conn, group_id) is None:
+        phone, suffix = group_id.split("_", 1)
+        xdb.create_group(conn, phone, suffix, tunnel_secret=tunnel_secret)
 
-    Uses real sqlite at a tmp path. No mocking. Reuses the same db file
-    across tests in the session (mirrors the existing relay/mock_llm fixtures).
+
+def _seed_c_client_active(app, group_id, client_id):
+    from x import db as xdb
+    from x import election as xelection
+    conn = app["db"]
+    xdb.upsert_client(conn, client_id=client_id, group_id=group_id, role="C",
+                      hostname="test", version="0.0.1")
+    xelection.force_active(conn, group_id, client_id)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def x_server(mock_llm):
+    """Unified X+relay server running as plain HTTP.
+
+    Replaces the old separate `relay` fixture.  Serves both control-plane
+    (/api/*, /install/*) and data-plane (/ws/notifications, /g/{group_id}/*).
     """
     tmp_home = tempfile.mkdtemp(prefix="llmrouter-test-")
     db_path = os.path.join(tmp_home, "data", "x.sqlite")
     releases_dir = os.path.join(tmp_home, "releases")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     os.makedirs(releases_dir, exist_ok=True)
-
-    # Stash for tests/fixtures that need to talk to X directly.
-    os.environ["LLMROUTER_HOME"] = tmp_home
 
     from x.server import create_app
     port = _free_port()
@@ -124,6 +134,16 @@ async def x_server():
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
 
+    # Pre-seed the test group with the fixed tunnel_secret so WS auth works.
+    _seed_test_group(app)
+
+    _setup_env(
+        mock_llm_port=mock_llm["port"],
+        x_port=port,
+        llmrouter_home=tmp_home,
+    )
+    _reload_config()
+
     info = {
         "app": app,
         "port": port,
@@ -136,96 +156,29 @@ async def x_server():
     yield info
 
     await runner.cleanup()
-    # Best-effort cleanup of tmp_home; ignore errors.
     import shutil
-    try:
-        shutil.rmtree(tmp_home, ignore_errors=True)
-    except Exception:
-        pass
-
-
-def _seed_test_group(x_server, group_id=TEST_GROUP_ID, tunnel_secret=TEST_TUNNEL_SECRET):
-    """Insert the test group with a fixed tunnel_secret so cookie-based WS auth
-    on B can use the same secret across test runs without round-tripping X."""
-    from x import db as xdb
-    conn = x_server["app"]["db"]
-    if xdb.get_group(conn, group_id) is None:
-        phone, suffix = group_id.split("_", 1)
-        xdb.create_group(conn, phone, suffix, tunnel_secret=tunnel_secret)
-
-
-def _seed_b_client(x_server, group_id, client_id, addr, port):
-    from x import db as xdb
-    conn = x_server["app"]["db"]
-    xdb.upsert_client(conn, client_id=client_id, group_id=group_id, role="B", hostname="test", version="0.0.1")
-    xdb.update_b_addr(conn, group_id, addr, port)
-
-
-def _seed_c_client_active(x_server, group_id, client_id):
-    from x import db as xdb
-    from x import election as xelection
-    conn = x_server["app"]["db"]
-    xdb.upsert_client(conn, client_id=client_id, group_id=group_id, role="C", hostname="test", version="0.0.1")
-    xelection.force_active(conn, group_id, client_id)
-
-
-@pytest_asyncio.fixture(scope="session")
-async def relay(mock_llm, x_server):
-    _ensure_certs()
-    mock_llm_port = mock_llm["port"]
-
-    relay_port = _free_port()
-    _setup_env(
-        mock_llm_port=mock_llm_port,
-        relay_port=relay_port,
-        x_port=x_server["port"],
-        llmrouter_home=x_server["home"],
-    )
-    _reload_config()
-
-    _seed_test_group(x_server)
-
-    import b_x_client
-    importlib.reload(b_x_client)
-    import relay_server
-    importlib.reload(relay_server)
-
-    app = relay_server.create_app()  # builds XClient automatically via build_x_client_for_b
-
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    cert_file = os.path.join(PROJECT_ROOT, "certs", "server.crt")
-    key_file = os.path.join(PROJECT_ROOT, "certs", "server.key")
-    ssl_ctx.load_cert_chain(cert_file, key_file)
-
-    runner = web.AppRunner(app)
-    await runner.setup()  # triggers on_startup → x_client.start() registers with X
-    site = web.TCPSite(runner, "127.0.0.1", relay_port, ssl_context=ssl_ctx)
-    await site.start()
-
-    app["port"] = relay_port
-    app["x_server"] = x_server
-
-    yield app
-
-    await runner.cleanup()
+    shutil.rmtree(tmp_home, ignore_errors=True)
 
 
 @pytest_asyncio.fixture
-async def tunnel(relay, x_server):
-    """Start tunnel client (C) connecting to relay (B)."""
+async def tunnel(x_server):
+    """Start tunnel client (C) connecting to X's WS endpoint."""
     _reload_config()
 
-    _seed_c_client_active(x_server, TEST_GROUP_ID, os.environ["CLIENT_ID_C"])
+    # Ensure C client is marked active before the WS connection attempt.
+    _seed_c_client_active(x_server["app"], TEST_GROUP_ID, os.environ["CLIENT_ID_C"])
 
     import _server
     importlib.reload(_server)
+    import c_x_client
+    importlib.reload(c_x_client)
 
     worker = _server.Worker()
     task = asyncio.create_task(worker.start())
 
-    relay_instance = relay["relay_instance"]
+    relay = x_server["app"]["relay"]
     for _ in range(50):
-        if relay_instance.tunnel_ws is not None and not relay_instance.tunnel_ws.closed:
+        if TEST_GROUP_ID in relay.tunnels and not relay.tunnels[TEST_GROUP_ID].closed:
             break
         await asyncio.sleep(0.1)
     else:
@@ -234,8 +187,9 @@ async def tunnel(relay, x_server):
     yield worker
 
     worker._running = False
-    if relay_instance.tunnel_ws and not relay_instance.tunnel_ws.closed:
-        await relay_instance.tunnel_ws.close()
+    ws = relay.tunnels.get(TEST_GROUP_ID)
+    if ws and not ws.closed:
+        await ws.close()
     task.cancel()
     try:
         await task
@@ -246,37 +200,28 @@ async def tunnel(relay, x_server):
 
 
 @pytest_asyncio.fixture
-async def full_chain(relay, mock_llm, tunnel, x_server):
-    """Full chain ready: x + mock_llm + relay + tunnel all connected."""
+async def full_chain(x_server, mock_llm, tunnel):
+    """Full chain ready: x_server (X+relay) + mock_llm + C tunnel all connected."""
     yield {
-        "relay": relay,
+        "x_server": x_server,
         "mock_llm": mock_llm,
         "tunnel": tunnel,
-        "x_server": x_server,
-        "relay_port": relay["port"],
+        "x_port": x_server["port"],
         "mock_llm_port": mock_llm["port"],
     }
 
 
-def _client_ssl_ctx():
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 @pytest_asyncio.fixture
-async def client(relay):
-    """HTTP client that trusts self-signed certs."""
-    connector = aiohttp.TCPConnector(ssl=_client_ssl_ctx())
-    session = aiohttp.ClientSession(connector=connector)
+async def client(x_server):
+    """Plain HTTP client for calling A→X relay endpoints (/g/{group_id}/...)."""
+    session = aiohttp.ClientSession()
     yield session
     await session.close()
 
 
 @pytest_asyncio.fixture
 async def http_client():
-    """Plain HTTP client for talking to X (no TLS)."""
+    """Plain HTTP client for X control-plane endpoints."""
     session = aiohttp.ClientSession()
     yield session
     await session.close()
