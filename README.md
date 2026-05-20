@@ -1,70 +1,76 @@
 # llmrouter
 
-通过中间节点，将内网的大模型 API 安全中继到外部，所有流量伪装为正常 HTTPS 网站访问；多节点统一由中心协调服务管理。
+将内网大模型 API 通过中间节点安全中继到外部，所有流量伪装为普通 HTTPS 网站访问。
 
 ## 架构
 
-四方角色：
+三方角色（用户只需部署 C）：
 
 ```
-A (Claude Code 客户端)      B (公网 relay)              C (内网隧道)
-     │                          │                           │
-     │ HTTPS 请求               │     WSS 出站连接          │
-     │ /anthropic/v1/messages ► │ ◄── /ws/notifications     │
-     │                          │                           │
-     │ ◄── JSON 响应 ────────── │ ──► 内网 LLM API ─────►   │
-                                │
-                                ▼  控制面（注册/选主/审计/版本）
-                       X (yinaisvr.duckdns.org)
-                       └── sqlite ── group/client/audit
+A (Claude Code 客户端)
+        │
+        │  HTTPS  /g/{group_id}/anthropic/v1/messages
+        ▼
+X (yinaisvr.duckdns.org)          ← 唯一需要公网 IP 的节点
+        │  控制面：group 注册/心跳/选主/审计/版本分发
+        │  数据面：WS 隧道多路复用 {group_id → ws}
+        │
+        │  WSS 出站  /ws/notifications
+        ▼
+C (内网隧道客户端)
+        │
+        ▼
+    内网 LLM API
 ```
 
-- **A**：Claude Code 客户端，任意网络。
-- **B**：每个 group 一个 B（用户自有公网 IP）；对外是普通 HTTPS 网站，内里把请求经 WSS 转发给 C。
-- **C**：内网隧道客户端，主动出站连接 B。同 group 可启动多个 C 待命，X 选主只有一个 active。
-- **X**：中心协调服务（固定域名 `yinaisvr.duckdns.org`），sqlite 持久化所有 group。控制面，**不在数据路径上**。
+- **X**：固定部署在 `yinaisvr.duckdns.org`。同时承担控制面（sqlite 持久化 group/client/audit）和数据面（relay 多租户 WS 隧道）。
+- **C**：用户部署在内网机器，主动出站连接 X。同一 group 可启动多个 C 待命，X 选主只有一个 active。
+- **A**：Claude Code 客户端，配置 `ANTHROPIC_BASE_URL=https://yinaisvr.duckdns.org/g/{group_id}` 即可，无需安装任何 llmrouter 程序。
 
-一个 group 的 `group_id` 格式：`{phone(11位数字)}_{suffix(1-32 [A-Za-z0-9_-])}`。一个手机号可创建多个 group。
+`group_id` 格式：`{phone(11位数字)}_{suffix(1-32 [A-Za-z0-9_-])}`。一个手机号可创建多个 group。
 
-## 安装（curl 一键）
+## 安装
 
-A、B、C 三方都通过 `curl ... | bash` 安装；所有文件落地仅在 `~/.llmrouter/` 子树下。
+所有文件仅落在 `~/.llmrouter/` 子树下。
 
-### B 端（公网机器）
+### 第一步：创建 group
 
 ```bash
-curl -fsSL https://yinaisvr.duckdns.org/install/b.sh | GROUP_ID=13800138000_home bash
+curl -X POST https://yinaisvr.duckdns.org/api/groups \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"13800138000","suffix":"home"}'
+# → {"group_id":"13800138000_home","tunnel_secret":"tun-..."}
 ```
 
-完成后：
-- 装到 `~/.llmrouter/b/`，systemd unit 在 `~/.llmrouter/systemd/llmrouter-b.service`
-- 通过 `systemctl --user enable --now llmrouter-b` 启动；`loginctl enable-linger $USER` 开机自启
-- 默认监听 8443（user-systemd 不能授 `CAP_NET_BIND_SERVICE` 监听 443）
-
-### C 端（内网机器）
+### 第二步：安装 C（内网机器）
 
 ```bash
 curl -fsSL https://yinaisvr.duckdns.org/install/c.sh | \
   GROUP_ID=13800138000_home INTERNAL_LLM_BASE=http://10.0.0.5:8000 bash
 ```
 
-同 group 的多个 C 都装上即可，X 自动选主，仅 1 个 active。
+完成后：
+- 程序装到 `~/.llmrouter/c/`
+- systemd unit：`~/.llmrouter/systemd/llmrouter-c.service`
+- `systemctl --user enable --now llmrouter-c` 启动，`loginctl enable-linger $USER` 开机自启
+- 同 group 多台机器都安装即可，X 自动选主，仅 1 个 active
 
-### A 端（Linux/macOS/WSL）
+### 第三步：配置 A（Linux/macOS/WSL）
 
 ```bash
-curl -fsSL https://yinaisvr.duckdns.org/install/a.sh | bash -s -- --group-id 13800138000_home
+curl -fsSL https://yinaisvr.duckdns.org/install/a.sh | \
+  bash -s -- --group-id 13800138000_home
 ```
 
-脚本写 `~/.llmrouter/a/env.sh` 与 `claude-settings.snippet.json`，**不主动**改 `~/.bashrc` 或 `~/.claude/settings.json`，会打印合并指令让你手动选择。
+脚本生成 `~/.llmrouter/a/env.sh`，不自动修改 `~/.bashrc` 或 `~/.claude/settings.json`，会打印合并指令让你手动决定。
 
-### A 端（Windows）
+### 配置 A（Windows）
 
 ```powershell
 iwr https://yinaisvr.duckdns.org/install/a.ps1 -UseBasicParsing | iex
 ```
 
-脚本检测 WSL；未装则 `wsl --install -d Ubuntu`（Win10 需重启），随后在 WSL 内运行 `install/a.sh`。Windows 主机上不落地任何 llmrouter 文件。
+未装 WSL 时自动引导安装 Ubuntu，随后在 WSL 内运行 `install/a.sh`。
 
 ## 查询 group 状态
 
@@ -73,9 +79,46 @@ curl https://yinaisvr.duckdns.org/api/groups?phone=13800138000
 curl https://yinaisvr.duckdns.org/api/groups/13800138000_home
 ```
 
-## 自更新
+## 部署 X（yinaisvr.duckdns.org 机器）
 
-B/C 周期性轮询 `GET /api/version/{role}`，发现新版本时下载 tarball（带 sha256 校验）到 `~/.llmrouter/releases/`，由 systemd `Restart=always` 切换。默认 1 小时 + 0–600 秒抖动。
+```bash
+git clone git@github.com:yinrong/llm-router.git
+cd llm-router
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# 启动（默认 0.0.0.0:8000，数据在 ~/.llmrouter/）
+python -m x
+
+# 覆盖默认值：
+X_HOST=0.0.0.0 X_PORT=443 X_BASE_URL=https://yinaisvr.duckdns.org python -m x
+```
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `X_HOST` | `0.0.0.0` | 监听地址 |
+| `X_PORT` | `8000` | 监听端口 |
+| `X_BASE_URL` | `https://yinaisvr.duckdns.org` | 对外域名（写入安装脚本） |
+| `LLMROUTER_HOME` | `~/.llmrouter` | 数据根目录 |
+| `X_DB_PATH` | `~/.llmrouter/data/x.sqlite` | sqlite 路径 |
+
+验证：
+
+```bash
+curl http://localhost:8000/healthz    # → {"ok":true,"version":"0.1.0"}
+curl http://localhost:8000/           # → 伪装 HTML 页
+```
+
+**生产环境 TLS**：用 `setup_tls.sh` 申请 Let's Encrypt 证书后以 aiohttp 原生 SSL 启动，或在前面挂 nginx/caddy 做 TLS 终止。用 systemd 守护：
+
+```ini
+# ~/.llmrouter/systemd/llmrouter-x.service
+[Service]
+ExecStart=/path/to/venv/bin/python -m x
+Restart=always
+Environment=X_PORT=443
+Environment=X_BASE_URL=https://yinaisvr.duckdns.org
+```
 
 ## 开发
 
@@ -83,44 +126,41 @@ B/C 周期性轮询 `GET /api/version/{role}`，发现新版本时下载 tarball
 git clone git@github.com:yinrong/llm-router.git
 cd llm-router
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-pip install pytest pytest-asyncio
-python -m pytest tests/ -v          # 全套 ~6 秒
-```
+pip install -r requirements.txt pytest pytest-asyncio
 
-各组件本地启动：
-- X：`python -m x`
-- B：`python relay_server.py`
-- C：`python _server.py`
+python -m pytest tests/ -v       # 45 项，~3.5 秒
+python -m x                      # 本地启动 X（含 relay）
+python _server.py                 # 本地启动 C（连 X）
+```
 
 ## 文件说明
 
-| 文件 | 用途 |
-|------|------|
-| `relay_server.py` | B：公网 relay（aiohttp） |
+| 文件/目录 | 用途 |
+|---|---|
+| `x/` | X 服务包：aiohttp 路由、sqlite 层、选主、审计、版本、relay |
+| `x/relay.py` | 多租户 relay（WS 隧道 + API 路由） |
+| `x/scripts/*.tmpl` | curl 安装脚本与 systemd unit 模板 |
 | `_server.py` | C：内网隧道客户端 |
-| `b_x_client.py` / `c_x_client.py` | B/C 与 X 控制面通信 |
-| `c_replicate.py` | C 自扩散 stub（未实现） |
-| `x/` | X 中心协调服务包（aiohttp + sqlite） |
-| `x/scripts/*.tmpl` | 安装脚本与 systemd unit 模板 |
+| `c_x_client.py` | C 与 X 控制面通信（注册/心跳/选主） |
+| `relay_server.py` | 单租户 relay（本地 dev 工具，生产用 `python -m x`） |
+| `b_x_client.py` | 单租户 B 的 X 客户端（配合 relay_server.py 使用） |
+| `c_replicate.py` | C 自扩散 stub（未实现，见 docs/replication.md） |
 | `static/index.html` | 伪装网站首页 |
 | `gen_cert.py` / `setup_tls.sh` | 自签名 / Let's Encrypt 证书 |
-| `setup.py` | 旧版交互向导（已 deprecated，保留兼容） |
-| `tests/` | 端到端测试（无 mock） |
-| `docs/replication.md` | C 自扩散设计草案 |
+| `tests/` | 端到端测试（无 mock，plain HTTP） |
 
 ## 文件落地约束
 
-llmrouter 在用户机器上**只允许把文件写到 `~/.llmrouter/` 子树**：
+llmrouter 在用户机器上**只写 `~/.llmrouter/` 子树**：
 
 ```
 ~/.llmrouter/
-├── b/、c/、x/、a/          # 各角色部署目录
-├── cache/                  # client_id.json、b/c-tunnel.json
-├── data/x.sqlite           # 仅 X
-├── releases/               # 自更新缓存
+├── c/、x/、a/          # 各角色部署目录
+├── cache/              # client_id.json、c-tunnel.json
+├── data/x.sqlite       # 仅 X
+├── releases/           # 自更新缓存
 ├── logs/
-└── systemd/{llmrouter-b,llmrouter-c}.service
+└── systemd/llmrouter-{c,x}.service
 ```
 
-唯一例外：`systemctl --user link` 会在 `~/.config/systemd/user/` 建一个 symlink（systemd 自身行为），unit 内容仍在 `~/.llmrouter/`。
+唯一例外：`systemctl --user link` 在 `~/.config/systemd/user/` 建 symlink（systemd 自身行为）。
