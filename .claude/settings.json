@@ -1,0 +1,11 @@
+{
+  "env": {
+    "hasCompletedOnboarding": "true",
+    "ANTHROPIC_BASE_URL": "http://model.mify.ai.srv/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "sk-UFop8bGkZVJZUz1FVS9E5w20r1591Kj1d8i6i6AlI7VXkeic",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ppio/pa/claude-sonnet-4-6",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ppio/pa/claude-sonnet-4-6",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ppio/pa/claude-sonnet-4-6"
+  },
+  "skipDangerousModePermissionPrompt": true
+}

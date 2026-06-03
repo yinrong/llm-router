@@ -28,6 +28,19 @@ dist/
 x/release/*.tgz
 x/releases/*.tgz
 
+# Claude Code — track memory & settings, exclude sessions & secrets
+.claude/**/*.jsonl
+.claude/**/tool-results/
+.claude/**/.credentials.json
+.claude/**/stats-cache.json
+.claude/**/shell-snapshots/
+.claude/**/sessions/
+.claude/**/backups/
+.claude/**/cache/
+.claude/**/paste-cache/
+.claude/**/file-history/
+.claude/**/plugins/marketplaces/
+
 # Editor / OS
 .vscode/
 .idea/
