@@ -13,8 +13,8 @@ TEST_TUNNEL_SECRET = "tun-test-secret-for-e2e"
 TEST_GROUP_ID = "13800138000_test"
 
 
-async def test_camouflage_index(x_server, client):
-    """GET / returns the static camouflage page."""
+async def test_static_index(x_server, client):
+    """GET / returns the static index page."""
     port = x_server["port"]
     async with client.get(f"http://127.0.0.1:{port}/") as resp:
         assert resp.status == 200
@@ -22,8 +22,8 @@ async def test_camouflage_index(x_server, client):
         assert "<html" in text.lower() or "welcome" in text.lower()
 
 
-async def test_camouflage_random_path(x_server, client):
-    """GET /random/path returns camouflage page (catch-all)."""
+async def test_unknown_path_returns_index(x_server, client):
+    """GET /random/path returns static page (catch-all)."""
     port = x_server["port"]
     async with client.get(f"http://127.0.0.1:{port}/some/random/path") as resp:
         assert resp.status == 200
@@ -32,7 +32,7 @@ async def test_camouflage_random_path(x_server, client):
 
 
 async def test_tunnel_auth_reject(x_server):
-    """WebSocket with wrong cookie gets 404 (camouflage)."""
+    """WebSocket with wrong cookie gets 404 (endpoint not revealed)."""
     port = x_server["port"]
     session = aiohttp.ClientSession()
     try:

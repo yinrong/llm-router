@@ -235,7 +235,7 @@ async def install_a_ps1(request: web.Request) -> web.Response:
     return web.Response(text=_render_install("a.ps1.tmpl", request), content_type="text/plain")
 
 
-def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yinaisvr.duckdns.org",
+def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "",
                heartbeat_interval: int = 30, election_poll: int = 5) -> web.Application:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     os.makedirs(releases_dir, exist_ok=True)
@@ -253,7 +253,6 @@ def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yi
         "db_path": db_path,
     }
 
-    # Camouflage home page
     app.router.add_get("/", relay.handle_index)
 
     # Control-plane endpoints
@@ -277,7 +276,7 @@ def create_app(*, db_path: str, releases_dir: str, x_base_url: str = "https://yi
     app.router.add_get("/ws/notifications", relay.handle_websocket)
     app.router.add_route("*", r"/g/{group_id}/{path:.*}", relay.handle_api)
 
-    # Catch-all camouflage (must be last)
+    # Catch-all static page (must be last)
     app.router.add_route("*", r"/{path:.*}", relay.handle_catch_all)
 
     async def _close_db(app):
@@ -298,7 +297,7 @@ def main():
     releases_dir = os.environ.get("X_RELEASES_DIR", os.path.join(home, "releases"))
     host = os.environ.get("X_HOST", "0.0.0.0")
     port = int(os.environ.get("X_PORT", "8000"))
-    x_base_url = os.environ.get("X_BASE_URL", "https://yinaisvr.duckdns.org")
+    x_base_url = os.environ.get("X_BASE_URL", "")  # must be set in .env; no default domain
 
     app = create_app(db_path=db_path, releases_dir=releases_dir, x_base_url=x_base_url)
     web.run_app(app, host=host, port=port)

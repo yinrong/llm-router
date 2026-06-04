@@ -105,8 +105,8 @@ class Worker:
     def _ws_url() -> str:
         """Derive the relay WS URL from X_BASE_URL (the canonical X/B address).
 
-        Production:  https://yinaisvr.duckdns.org → wss://yinaisvr.duckdns.org/ws/notifications
-        Tests / dev: http://127.0.0.1:PORT         → ws://127.0.0.1:PORT/ws/notifications
+        Production:  https://your-server:8443  → wss://your-server:8443/ws/notifications
+        Tests / dev: http://127.0.0.1:PORT     → ws://127.0.0.1:PORT/ws/notifications
         """
         from urllib.parse import urlparse
         p = urlparse(config.X_BASE_URL)

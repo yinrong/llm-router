@@ -2,12 +2,12 @@
 
 Handles WebSocket tunnels from C clients and routes API requests from A
 to the correct group's active tunnel. Merged into X so users only need
-one public IP (yinaisvr.duckdns.org).
+one public server.
 
 Data path: A → X(/g/{group_id}/*) → WS tunnel → C → LLM.
 
 WS auth: Cookie _sid={tunnel_secret}.  Lookup group by secret in sqlite.
-Wrong secret → 404 (camouflage, not 401).
+Wrong secret → 404 (security: do not reveal whether path exists).
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class MultiTenantRelay:
             self._group_locks[group_id] = asyncio.Lock()
         return self._group_locks[group_id]
 
-    # ── static pages (camouflage) ────────────────────────────────────────────
+    # ── static pages ─────────────────────────────────────────────────────────
     async def handle_index(self, request: web.Request) -> web.Response:
         static_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "index.html")
         if os.path.exists(static_path):
@@ -70,7 +70,7 @@ class MultiTenantRelay:
         group = xdb.get_group_by_secret(self._db, token)
         if group is None:
             log.warning("Tunnel auth failed from %s (unknown secret)", request.remote)
-            raise web.HTTPNotFound()  # 404, not 401 (camouflage)
+            raise web.HTTPNotFound()  # 404: do not reveal endpoint existence
 
         group_id = group["group_id"]
         ws = web.WebSocketResponse(heartbeat=None)

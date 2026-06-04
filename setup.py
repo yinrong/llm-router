@@ -107,8 +107,8 @@ def setup_c():
 def main():
     print("=" * 40)
     print("   llmrouter 配置向导（旧版，已弃用）")
-    print("   推荐改用 X 协调服务的 curl 安装脚本：")
-    print("   curl -fsSL https://yinaisvr.duckdns.org/install/b.sh | bash")
+    print("   推荐改用 X 服务的 curl 安装脚本：")
+    print("   curl -fsSL https://<your-x-server>/install/c.sh | bash")
     print("=" * 40)
     print("\n选择本机角色:")
     print("  [B] claude-code-proxy（有公网 IP 的机器，第一个配置）")

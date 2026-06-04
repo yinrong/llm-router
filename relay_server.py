@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Relay server (runs on B - the machine with public IP).
+Relay server — single-tenant local dev mode.
 
-Serves a camouflage static website on /.
 Accepts WebSocket tunnel from C on /ws/notifications.
 Proxies API requests from A through the tunnel to C.
 
-The /api/* routes here belong to B (LLM API surface, kept for OpenAI-style
-endpoints A might hit). They DO NOT collide with X's /api/* — X lives at
-a different host (yinaisvr.duckdns.org). Don't add audit/etc. paths here.
+Note: production deployments use `python -m x` (multi-tenant relay
+bundled with X).  This file is kept for local dev/testing convenience.
+The /api/* routes forward to LLM endpoints that A may call.
 """
 
 import asyncio
@@ -48,7 +47,7 @@ class RelayServer:
         token = next((p.split("=", 1)[1] for p in cookie.split(";") if p.strip().startswith("_sid=")), "")
         if token != config.TUNNEL_SECRET:
             log.warning("Tunnel auth failed from %s", request.remote)
-            raise web.HTTPNotFound()  # 404, not 401 (camouflage)
+            raise web.HTTPNotFound()  # 404: do not reveal endpoint existence
 
         ws = web.WebSocketResponse(heartbeat=None)
         await ws.prepare(request)

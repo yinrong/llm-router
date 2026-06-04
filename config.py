@@ -18,7 +18,7 @@ RELAY_ADDR = os.environ.get("RELAY_ADDR", "127.0.0.1")
 
 TUNNEL_SECRET = os.environ.get("TUNNEL_SECRET", "tun-llmrouter-default-secret-change-me")
 
-# WebSocket 路径（伪装为通知推送端点）
+# WebSocket 路径
 WS_PATH = "/ws/notifications"
 
 # C 网络内的 LLM API 地址
@@ -31,7 +31,6 @@ KEY_FILE = os.environ.get("KEY_FILE", "certs/server.key")
 # 是否使用 TLS（auto 时根据证书文件是否存在判断）
 RELAY_TLS = os.environ.get("RELAY_TLS", "auto")
 
-# 心跳间隔范围（秒）- 随机化避免检测
 HEARTBEAT_MIN = 20
 HEARTBEAT_MAX = 40
 
@@ -52,7 +51,7 @@ RELEASES_DIR = os.path.join(LLMROUTER_HOME, "releases")
 LOG_DIR = os.path.join(LLMROUTER_HOME, "logs")
 
 # X coordinator
-X_BASE_URL = os.environ.get("X_BASE_URL", "https://yinaisvr.duckdns.org")
+X_BASE_URL = os.environ.get("X_BASE_URL", "")  # required; set in .env — no hardcoded default
 GROUP_ID = os.environ.get("GROUP_ID", "")
 CLIENT_ID = os.environ.get("CLIENT_ID", "")
 ROLE = os.environ.get("ROLE", "")  # B or C — set explicitly by relay/tunnel
