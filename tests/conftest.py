@@ -90,20 +90,22 @@ async def mock_llm():
 
 
 def _seed_test_group(app, group_id=TEST_GROUP_ID, tunnel_secret=TEST_TUNNEL_SECRET):
-    from x import db as xdb
-    conn = app["db"]
-    if xdb.get_group(conn, group_id) is None:
+    from x.application.group_service import GroupService
+    svc: GroupService = app["services"]["group"]
+    if svc.get_group(group_id) is None:
         phone, suffix = group_id.split("_", 1)
-        xdb.create_group(conn, phone, suffix, tunnel_secret=tunnel_secret)
+        svc.create_group(phone, suffix, tunnel_secret=tunnel_secret)
 
 
 def _seed_c_client_active(app, group_id, client_id):
-    from x import db as xdb
-    from x import election as xelection
-    conn = app["db"]
-    xdb.upsert_client(conn, client_id=client_id, group_id=group_id, role="C",
-                      hostname="test", version="0.0.1")
-    xelection.force_active(conn, group_id, client_id)
+    from x.application.registration_service import RegistrationService
+    from x.infrastructure.repositories.sqlite_client_repo import SqliteClientRepository
+    reg_svc: RegistrationService = app["services"]["registration"]
+    client_repo: SqliteClientRepository = app["services"]["client_repo"]
+    reg_svc.register_c(group_id, client_id, hostname="test", version="0.0.1")
+    # 使用 SqliteClientRepository 的测试辅助方法强制设置 active
+    import time
+    client_repo.force_active_for_test(group_id, client_id, int(time.time()))
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -161,19 +163,27 @@ async def x_server(mock_llm):
 
 
 @pytest_asyncio.fixture
-async def tunnel(x_server):
-    """Start tunnel client (C) connecting to X's WS endpoint."""
+async def tunnel(x_server, mock_llm):
+    """Start TunnelWorker (C) connecting to X's WS endpoint."""
     _reload_config()
 
     # Ensure C client is marked active before the WS connection attempt.
     _seed_c_client_active(x_server["app"], TEST_GROUP_ID, os.environ["CLIENT_ID_C"])
 
-    import _server
-    importlib.reload(_server)
-    import c_x_client
-    importlib.reload(c_x_client)
+    from c.settings import CSettings
+    from c.tunnel_worker import TunnelWorker
 
-    worker = _server.Worker()
+    settings = CSettings(
+        x_base_url=x_server["url"],
+        group_id=TEST_GROUP_ID,
+        client_id=os.environ["CLIENT_ID_C"],
+        tunnel_secret=TEST_TUNNEL_SECRET,
+        internal_llm_base=f"http://127.0.0.1:{mock_llm['port']}",
+        cache_dir=os.path.join(x_server["home"], "cache"),
+        election_poll_interval=1,
+        heartbeat_interval=30,
+    )
+    worker = TunnelWorker(settings)
     task = asyncio.create_task(worker.start())
 
     relay = x_server["app"]["relay"]
