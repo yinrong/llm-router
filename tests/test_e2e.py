@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 import aiohttp
 import pytest
@@ -180,15 +181,26 @@ async def test_concurrent_requests(full_chain, client):
 
 async def test_tunnel_disconnect_reconnect(x_server, mock_llm, client):
     """After tunnel disconnects, requests fail; after reconnect, they succeed."""
-    import importlib
-    import _server
+    import os
+    from c.settings import CSettings
+    from c.tunnel_worker import TunnelWorker
 
     port = x_server["port"]
     relay = x_server["app"]["relay"]
 
+    def _make_worker():
+        s = CSettings(
+            x_base_url=x_server["url"],
+            group_id=TEST_GROUP_ID,
+            client_id=os.environ["CLIENT_ID_C"],
+            tunnel_secret=TEST_TUNNEL_SECRET,
+            internal_llm_base=f"http://127.0.0.1:{mock_llm['port']}",
+            cache_dir=os.path.join(x_server["home"], "cache"),
+        )
+        return TunnelWorker(s)
+
     # Start tunnel
-    importlib.reload(_server)
-    worker = _server.Worker()
+    worker = _make_worker()
     task = asyncio.create_task(worker.start())
 
     for _ in range(50):
@@ -228,8 +240,7 @@ async def test_tunnel_disconnect_reconnect(x_server, mock_llm, client):
         assert resp.status == 502
 
     # Reconnect
-    importlib.reload(_server)
-    worker2 = _server.Worker()
+    worker2 = _make_worker()
     task2 = asyncio.create_task(worker2.start())
 
     for _ in range(50):
@@ -261,10 +272,10 @@ async def test_tunnel_disconnect_reconnect(x_server, mock_llm, client):
 
 async def test_upstream_unreachable(x_server, client):
     """Request when upstream LLM is unreachable returns 502 proxy_error."""
-    import importlib
     import os
     import socket
-    import _server
+    from c.settings import CSettings
+    from c.tunnel_worker import TunnelWorker
 
     port = x_server["port"]
     relay = x_server["app"]["relay"]
@@ -275,14 +286,16 @@ async def test_upstream_unreachable(x_server, client):
     dead_port = sock.getsockname()[1]
     sock.close()
 
-    # Reconfigure C to point to unreachable server
-    os.environ["INTERNAL_LLM_BASE"] = f"http://127.0.0.1:{dead_port}"
-
-    import config
-    importlib.reload(config)
-    importlib.reload(_server)
-
-    worker = _server.Worker()
+    # Create worker pointing to unreachable LLM
+    settings = CSettings(
+        x_base_url=x_server["url"],
+        group_id=TEST_GROUP_ID,
+        client_id=os.environ["CLIENT_ID_C"],
+        tunnel_secret=TEST_TUNNEL_SECRET,
+        internal_llm_base=f"http://127.0.0.1:{dead_port}",
+        cache_dir=os.path.join(x_server["home"], "cache"),
+    )
+    worker = TunnelWorker(settings)
     task = asyncio.create_task(worker.start())
 
     for _ in range(100):
@@ -314,3 +327,80 @@ async def test_upstream_unreachable(x_server, client):
         pass
     if worker.session:
         await worker.session.close()
+
+
+async def test_completion_log_non_stream(full_chain, client):
+    """Non-stream request writes a JSONL completion record to disk."""
+    port = full_chain["x_port"]
+    home = full_chain["x_server"]["home"]
+
+    async with client.post(
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "log me"}],
+        },
+        headers={"content-type": "application/json"},
+    ) as resp:
+        assert resp.status == 200
+
+    await asyncio.sleep(0.1)
+
+    completions_dir = os.path.join(home, "data", "completions")
+    records = []
+    for fname in sorted(os.listdir(completions_dir)):
+        with open(os.path.join(completions_dir, fname)) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+    matched = [r for r in records if r.get("messages") == [{"role": "user", "content": "log me"}]]
+    assert len(matched) >= 1
+    r = matched[0]
+    assert r["group_id"] == TEST_GROUP_ID
+    assert r["model"] == "test-model"
+    assert r["finish_reason"] != ""
+    assert r["latency_ms"] >= 0
+
+
+async def test_completion_log_stream(full_chain, client):
+    """Stream request writes a JSONL completion record after stream_end."""
+    port = full_chain["x_port"]
+    home = full_chain["x_server"]["home"]
+
+    async with client.post(
+        f"http://127.0.0.1:{port}/g/{TEST_GROUP_ID}/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "stream log me"}],
+            "stream": True,
+        },
+        headers={"content-type": "application/json"},
+    ) as resp:
+        assert resp.status == 200
+        async for _ in resp.content:
+            pass
+
+    await asyncio.sleep(0.1)
+
+    completions_dir = os.path.join(home, "data", "completions")
+    files = sorted(os.listdir(completions_dir))
+    assert len(files) >= 1
+
+    records = []
+    for fname in files:
+        with open(os.path.join(completions_dir, fname)) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+    stream_records = [
+        r for r in records
+        if r.get("messages") == [{"role": "user", "content": "stream log me"}]
+    ]
+    assert len(stream_records) >= 1
+    r = stream_records[0]
+    assert r["group_id"] == TEST_GROUP_ID
+    assert r["model"] == "test-model"
